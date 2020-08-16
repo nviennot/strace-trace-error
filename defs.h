@@ -258,6 +258,8 @@ struct tcb {
 	unsigned int currpers;	/* Personality at the time of scno update */
 # endif
 	unsigned long u_error;	/* Error code */
+	int last_err_fd;
+	char u_last_err_str[128];
 	kernel_ulong_t scno;	/* System call number */
 	kernel_ulong_t u_arg[MAX_ARGS];	/* System call arguments */
 	kernel_long_t u_rval;	/* Return value */

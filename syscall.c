@@ -24,6 +24,10 @@
 #include "retval.h"
 #include <limits.h>
 
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+
 /* for struct iovec */
 #include <sys/uio.h>
 
@@ -440,15 +444,15 @@ print_err(int64_t err, bool negated)
 }
 
 static void
-print_err_ret(kernel_ulong_t ret, unsigned long u_error)
+print_err_ret(kernel_ulong_t ret, unsigned long u_error, const char *last_err_source)
 {
 	const char *u_error_str = err_name(u_error);
 
 	if (u_error_str)
-		tprintf("= %" PRI_kld " %s (%s)",
-			ret, u_error_str, strerror(u_error));
+		tprintf("= %" PRI_kld " %s (%s) %s",
+			ret, u_error_str, strerror(u_error), last_err_source);
 	else
-		tprintf("= %" PRI_kld " (errno %lu)", ret, u_error);
+		tprintf("= %" PRI_kld " (errno %lu) %s", ret, u_error, last_err_source);
 }
 
 static long get_regs(struct tcb *);
@@ -817,7 +821,7 @@ syscall_exiting_trace(struct tcb *tcp, struct timespec *ts, int res)
 
 	if (raw(tcp)) {
 		if (tcp->u_error)
-			print_err_ret(tcp->u_rval, tcp->u_error);
+			print_err_ret(tcp->u_rval, tcp->u_error, tcp->u_last_err_str);
 		else
 			tprintf("= %#" PRI_klx, tcp->u_rval);
 
@@ -879,7 +883,7 @@ syscall_exiting_trace(struct tcb *tcp, struct timespec *ts, int res)
 			tprints("= ? ERESTART_RESTARTBLOCK (Interrupted by signal)");
 			break;
 		default:
-			print_err_ret(tcp->u_rval, tcp->u_error);
+			print_err_ret(tcp->u_rval, tcp->u_error, tcp->u_last_err_str);
 			break;
 		}
 		if (syscall_tampered(tcp))
@@ -1437,9 +1441,35 @@ get_syscall_result(struct tcb *tcp)
 	return 1;
 }
 
+static int read_last_err(struct tcb *tcp, char *buf, size_t len)
+{
+	ssize_t ret;
+
+	if (tcp->last_err_fd == 0) {
+		char buf[128];
+		sprintf(buf, "/proc/%d/last_error", tcp->pid);
+		tcp->last_err_fd = open(buf, O_RDONLY);
+		if (tcp->last_err_fd < 0)
+			error_msg("Can't open %s buf", buf);
+	}
+
+	if (tcp->last_err_fd < 0)
+		return -1;
+
+	ret = pread(tcp->last_err_fd, buf, len-1, 0);
+	if (ret < 0)
+		return ret;
+
+	buf[len] = '\0';
+	return 0;
+}
+
 static void
 get_error(struct tcb *tcp, const bool check_errno)
 {
+	char buf[256];
+	unsigned int last_err_errno;
+
 	if (ptrace_syscall_info_is_valid()) {
 		if (ptrace_sci.exit.is_error) {
 			tcp->u_rval = -1;
@@ -1451,6 +1481,15 @@ get_error(struct tcb *tcp, const bool check_errno)
 	} else {
 		tcp->u_error = 0;
 		arch_get_error(tcp, check_errno);
+	}
+
+	if (tcp->u_error &&
+	    !read_last_err(tcp, buf, sizeof(buf)) &&
+	    sscanf(buf, "%s %d\n", tcp->u_last_err_str, &last_err_errno) == 2 &&
+	    last_err_errno == tcp->u_error) {
+		/* error is in the buffer */
+	} else {
+		strcpy(tcp->u_last_err_str, "");
 	}
 }
 
